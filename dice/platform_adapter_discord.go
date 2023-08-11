@@ -1,8 +1,12 @@
 package dice
 
 import (
+	"errors"
 	"fmt"
 	"github.com/bwmarrin/discordgo"
+	"github.com/gorilla/websocket"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +16,7 @@ import (
 type PlatformAdapterDiscord struct {
 	Session       *IMSession         `yaml:"-" json:"-"`
 	Token         string             `yaml:"token" json:"token"`
+	ProxyURL      string             `yaml:"proxyURL" json:"proxyURL"`
 	EndPoint      *EndPointInfo      `yaml:"-" json:"-"`
 	IntentSession *discordgo.Session `yaml:"-" json:"-"`
 }
@@ -63,12 +68,56 @@ func (pa *PlatformAdapterDiscord) Serve() int {
 		pa.Session.Parent.Logger.Errorf("创建DiscordSession时出错:%s", err.Error())
 		return 1
 	}
+	if pa.ProxyURL != "" {
+		u, e := url.Parse(pa.ProxyURL)
+		if e != nil {
+			pa.Session.Parent.Logger.Errorf("代理地址解析错误%s", e.Error())
+			return 1
+		}
+		dg.Client.Transport = &http.Transport{
+			Proxy: http.ProxyURL(u),
+		}
+		dg.Dialer = &websocket.Dialer{HandshakeTimeout: 45 * time.Second}
+		dg.Dialer.Proxy = http.ProxyURL(u)
+	}
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		//忽略自己的消息……以及其他机器人的消息和系统消息
 		if m.Author.Bot || m.Author.System {
 			return
 		}
-		pa.Session.Execute(pa.EndPoint, pa.toStdMessage(m), false)
+		msg, err := pa.toStdMessage(m)
+		if err != nil {
+			return
+		}
+		pa.Session.Execute(pa.EndPoint, msg, false)
+	})
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageDelete) {
+		ch, err := pa.IntentSession.Channel(m.ChannelID)
+		if err != nil {
+			pa.Session.Parent.Logger.Errorf("获取Discord频道#%s信息时出错:%s", FormatDiceIdDiscordChannel(m.ChannelID), err.Error())
+			return
+		}
+		msg := &Message{}
+		if ch.Type != discordgo.ChannelTypeDM {
+			msg.GroupId = FormatDiceIdDiscordChannel(m.ChannelID)
+			msg.MessageType = "group"
+		} else {
+			msg.MessageType = "private"
+		}
+		msg.GuildId = m.GuildID
+		msg.Sender = SenderBase{}
+		if m.BeforeDelete != nil {
+			msg.Sender.UserId = FormatDiceIdDiscord(m.BeforeDelete.Author.ID)
+
+			msg.Sender.Nickname = m.BeforeDelete.Author.Username
+		} else if m.Author != nil {
+			msg.Sender.UserId = FormatDiceIdDiscord(m.Author.ID)
+			msg.Sender.Nickname = m.Author.Username
+		}
+		msg.RawId = m.ID
+		msg.Time = m.Timestamp.Unix()
+		mctx := &MsgContext{Session: pa.Session, EndPoint: pa.EndPoint, Dice: pa.Session.Parent, MessageType: msg.MessageType}
+		pa.Session.OnMessageDeleted(mctx, msg)
 	})
 	//这里只处理消息，未来根据需要再改这里
 	dg.Identify.Intents = discordgo.IntentsAll
@@ -190,7 +239,7 @@ func (pa *PlatformAdapterDiscord) sendToChannelRaw(channelId string, text string
 	for _, element := range elem {
 		switch e := element.(type) {
 		case *TextElement:
-			msgSend.Content = msgSend.Content + e.Content
+			msgSend.Content = msgSend.Content + antiMarkdownFormat(e.Content)
 		case *AtElement:
 			if e.Target == "all" {
 				msgSend.Content = msgSend.Content + "@everyone "
@@ -205,9 +254,6 @@ func (pa *PlatformAdapterDiscord) sendToChannelRaw(channelId string, text string
 				Reader:      e.Stream,
 			})
 			msgSend.Files = files
-			if msgSend.Content != "" {
-				msgSend.Content = "```\n" + msgSend.Content + "\n```"
-			}
 			_, err = pa.IntentSession.ChannelMessageSendComplex(id, msgSend)
 			msgSend = &discordgo.MessageSend{Content: ""}
 		case *ImageElement:
@@ -219,14 +265,10 @@ func (pa *PlatformAdapterDiscord) sendToChannelRaw(channelId string, text string
 				Reader:      f.Stream,
 			})
 			msgSend.Files = files
-			if msgSend.Content != "" {
-				msgSend.Content = "```\n" + msgSend.Content + "\n```"
-			}
 			_, err = pa.IntentSession.ChannelMessageSendComplex(id, msgSend)
 			msgSend = &discordgo.MessageSend{Content: ""}
 		case *TTSElement:
 			if msgSend.Content != "" || msgSend.Files != nil {
-				msgSend.Content = "```\n" + msgSend.Content + "\n```"
 				_, err = pa.IntentSession.ChannelMessageSendComplex(id, msgSend)
 			}
 			if err != nil {
@@ -253,8 +295,8 @@ func (pa *PlatformAdapterDiscord) sendToChannelRaw(channelId string, text string
 		}
 	}
 	if msgSend.Content != "" || msgSend.Files != nil {
-		msgSend.Content = "```\n" + msgSend.Content + "\n```"
 		_, err = pa.IntentSession.ChannelMessageSendComplex(id, msgSend)
+		//pa.Session.Parent.Logger.Infof("向Discord频道#%s发送消息:%s", id, msgSend.Content)
 	}
 	if err != nil {
 		pa.Session.Parent.Logger.Errorf("向Discord频道#%s发送消息时出错:%s", id, err)
@@ -309,6 +351,9 @@ func FormatDiceIdDiscord(diceDiscord string) string {
 func FormatDiceIdDiscordChannel(diceDiscord string) string {
 	return fmt.Sprintf("DISCORD-CH-Group:%s", diceDiscord)
 }
+func FormatDiceIdDiscordGuild(diceDiscord string) string {
+	return fmt.Sprintf("DISCORD-Guild:%s", diceDiscord)
+}
 
 func ExtractDiscordUserId(id string) string {
 	if strings.HasPrefix(id, "DISCORD:") {
@@ -325,7 +370,7 @@ func ExtractDiscordChannelId(id string) string {
 }
 
 // 把discordgo的message转换成豹的message
-func (pa *PlatformAdapterDiscord) toStdMessage(m *discordgo.MessageCreate) *Message {
+func (pa *PlatformAdapterDiscord) toStdMessage(m *discordgo.MessageCreate) (*Message, error) {
 	msg := new(Message)
 	msg.Time = m.Timestamp.Unix()
 	msg.Message = m.Content
@@ -334,12 +379,14 @@ func (pa *PlatformAdapterDiscord) toStdMessage(m *discordgo.MessageCreate) *Mess
 	ch, err := pa.IntentSession.Channel(m.ChannelID)
 	if err != nil {
 		pa.Session.Parent.Logger.Errorf("获取Discord频道#%s信息时出错:%s", FormatDiceIdDiscordChannel(m.ChannelID), err.Error())
+		return nil, errors.New("")
 	}
 	if ch != nil && ch.Type == discordgo.ChannelTypeDM {
 		msg.MessageType = "private"
 	} else {
 		msg.MessageType = "group"
 		msg.GroupId = FormatDiceIdDiscordChannel(m.ChannelID)
+		msg.GuildId = ch.GuildID
 	}
 	send := new(SenderBase)
 	send.UserId = FormatDiceIdDiscord(m.Author.ID)
@@ -348,7 +395,7 @@ func (pa *PlatformAdapterDiscord) toStdMessage(m *discordgo.MessageCreate) *Mess
 		send.GroupRole = "admin"
 	}
 	msg.Sender = *send
-	return msg
+	return msg, nil
 }
 
 func (pa *PlatformAdapterDiscord) checkIfGuildAdmin(m *discordgo.Message) bool {

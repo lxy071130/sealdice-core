@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/fy0/lockfree"
+	"go.uber.org/zap"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -633,7 +634,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 						CommandInfo: ctx.CommandInfo,
 					}
 
-					model.LogAppend(ctx.Dice.DBLogs, group.GroupId, group.LogCurName, &a)
+					LogAppend(ctx, group.GroupId, group.LogCurName, &a)
 				}
 			}
 
@@ -657,7 +658,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 						CommandId:   ctx.CommandId,
 						CommandInfo: ctx.CommandInfo,
 					}
-					model.LogAppend(ctx.Dice.DBLogs, group.GroupId, group.LogCurName, &a)
+					LogAppend(ctx, group.GroupId, group.LogCurName, &a)
 				}
 			}
 		},
@@ -683,7 +684,15 @@ func RegisterBuiltinExtLog(self *Dice) {
 						RawMsgId:  msg.RawId,
 					}
 
-					model.LogAppend(ctx.Dice.DBLogs, ctx.Group.GroupId, ctx.Group.LogCurName, &a)
+					LogAppend(ctx, ctx.Group.GroupId, ctx.Group.LogCurName, &a)
+				}
+			}
+		},
+		OnMessageDeleted: func(ctx *MsgContext, msg *Message) {
+			if ctx.Group != nil {
+				if ctx.Group.LogOn {
+					LogDeleteById(ctx, ctx.Group.GroupId, ctx.Group.LogCurName, msg.RawId)
+					//ctx.Session.Parent.Logger.Infof("删除日志 %s %s", ctx.Group.GroupId, msg.RawId.(string))
 				}
 			}
 		},
@@ -735,7 +744,7 @@ func LogAppend(ctx *MsgContext, groupId string, logName string, logItem *model.L
 	ok := model.LogAppend(ctx.Dice.DBLogs, groupId, logName, logItem)
 	if ok {
 		if size, ok := model.LogLinesCountGet(ctx.Dice.DBLogs, groupId, logName); ok {
-			// 每记录1000条发出提示
+			// 默认每记录500条发出提示
 			if ctx.Dice.LogSizeNoticeEnable {
 				if ctx.Dice.LogSizeNoticeCount == 0 {
 					ctx.Dice.LogSizeNoticeCount = 500
@@ -750,6 +759,15 @@ func LogAppend(ctx *MsgContext, groupId string, logName string, logItem *model.L
 		}
 	}
 	return ok
+}
+
+func LogDeleteById(ctx *MsgContext, groupId string, logName string, messageId interface{}) bool {
+	err := model.LogMarkDeleteByMsgId(ctx.Dice.DBLogs, groupId, logName, messageId)
+	if err != nil {
+		ctx.Dice.Logger.Error("LogDeleteById:", zap.Error(err))
+		return false
+	}
+	return true
 }
 
 func LogSendToBackend(ctx *MsgContext, groupId string, logName string) (string, error) {

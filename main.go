@@ -3,16 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/jessevdk/go-flags"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	cp "github.com/otiai10/copy"
 	"mime"
 	"net"
 	"net/http"
 	"path/filepath"
 	"sealdice-core/dice/model"
 	"sealdice-core/migrate"
+
+	"github.com/jessevdk/go-flags"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	cp "github.com/otiai10/copy"
+
 	//_ "net/http/pprof"
 	"os"
 	"os/exec"
@@ -139,6 +141,7 @@ func main() {
 		Delay                  int64  `long:"delay"`
 		JustForTest            bool   `long:"just-for-test"`
 		DBCheck                bool   `long:"db-check" description:"检查数据库是否有问题"`
+		ShowEnv                bool   `long:"show-env" description:"显示环境变量"`
 	}
 
 	//dice.SetDefaultNS([]string{"114.114.114.114:53", "8.8.8.8:53"}, false)
@@ -153,6 +156,12 @@ func main() {
 	}
 	if opts.DBCheck {
 		model.DBCheck("data/default")
+		return
+	}
+	if opts.ShowEnv {
+		for i, e := range os.Environ() {
+			println(i, e)
+		}
 		return
 	}
 	deleteOldWrongFile()
@@ -451,6 +460,14 @@ func diceServe(d *dice.Dice) {
 		d.Logger.Infof("未检测到任何帐号，请先到“帐号设置”进行添加")
 	}
 
+	d.UIEndpoint = new(dice.EndPointInfo)
+	d.UIEndpoint.Enable = true
+	d.UIEndpoint.Platform = "UI"
+	d.UIEndpoint.Id = "1"
+	d.UIEndpoint.State = 1
+	d.UIEndpoint.UserId = "UI:1000"
+	d.UIEndpoint.Adapter = &dice.PlatformAdapterHttp{}
+
 	for _, _conn := range d.ImSession.EndPoints {
 		if _conn.Enable {
 			go func(conn *dice.EndPointInfo) {
@@ -464,7 +481,11 @@ func diceServe(d *dice.Dice) {
 					}
 					if conn.EndPointInfoBase.ProtocolType == "onebot" {
 						pa := conn.Adapter.(*dice.PlatformAdapterGocq)
-						dice.GoCqHttpServe(d, conn, pa.InPackGoCqHttpPassword, pa.InPackGoCqHttpProtocol, true)
+						dice.GoCqHttpServe(d, conn, dice.GoCqHttpLoginInfo{
+							Password:   pa.InPackGoCqHttpPassword,
+							Protocol:   pa.InPackGoCqHttpProtocol,
+							IsAsyncRun: true,
+						})
 					}
 					time.Sleep(10 * time.Second) // 稍作等待再连接
 					dice.ServeQQ(d, conn)

@@ -265,6 +265,9 @@ func (m *HelpManager) Load() {
 					if err == nil {
 						for _, row := range rows {
 							//Key Synonym Content Description Catalogue Tag
+							if len(row) < 3 {
+								continue
+							}
 							key := row[0]
 							synonym := row[1]
 							content := row[2]
@@ -342,7 +345,10 @@ func (m *HelpManager) AddItem(item HelpTextItem) error {
 			m.batch = m.Index.NewBatch()
 		}
 		if m.batchNum >= 50 {
-			_ = m.Index.Batch(m.batch)
+			err := m.Index.Batch(m.batch)
+			if err != nil {
+				return err
+			}
 			m.batch.Reset()
 			m.batchNum = 0
 		}
